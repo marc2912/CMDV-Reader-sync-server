@@ -1,0 +1,22 @@
+# Everything, then the few things the build actually needs back.
+#
+# An allowlist rather than a list of exclusions, because the cost of getting that wrong is
+# invisible: a stray `.build` directory in the context adds gigabytes to every `docker build` and
+# nothing says so. Getting *this* wrong, by contrast, fails the build loudly with a missing file.
+*
+
+# Both the bare name and the recursive form for each directory. Re-including a directory after a
+# blanket exclusion is reliable, but which of the two forms is required has varied between
+# Docker's classic builder and BuildKit, and the belt-and-braces version costs nothing.
+!Package.swift
+!Package.resolved
+!Sources
+!Sources/**
+!Tests
+!Tests/**
+
+# And not these, wherever they turn up inside the directories above.
+**/.DS_Store
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm

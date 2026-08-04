@@ -1,0 +1,26 @@
+# Swift Package Manager
+#
+# `Package.resolved` is deliberately *not* ignored. This package produces a server people deploy,
+# so the dependency graph should be the same one for everybody who checks it out — and the
+# Dockerfile copies the file in to get a reproducible image.
+.build/
+.swiftpm/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# The database, and everything SQLite puts beside it. Never commit a reader's data.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+data/
+
+# Local environment overrides. `.env.example` is committed; `.env` is not.
+.env
+
+# macOS
+.DS_Store

@@ -1,0 +1,76 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: cmdv-sync
+
+services:
+  sync:
+    build:
+      context: .
+      # Uncomment to build with a newer Swift than the 6.1 floor.
+      # args:
+      #   SWIFT_VERSION: "6.2"
+    image: cmdv-sync-server:local
+    container_name: cmdv-sync-server
+    restart: unless-stopped
+
+    # Published on the loopback address only, deliberately.
+    #
+    # This server does not terminate TLS. Binding the published port to 127.0.0.1 means that
+    # until you have put a reverse proxy in front of it, it is reachable from this machine and
+    # nowhere else — so the default configuration cannot accidentally be the one on the internet.
+    #
+    # Change to "8080:8080" to reach it from elsewhere on a home network or a VPN, which the app
+    # permits over plain HTTP for private addresses. Do not change it to reach it from the
+    # internet; put a proxy in front instead. See the README.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      # A named volume rather than a bind mount, because Docker gives a fresh named volume the
+      # ownership the image set on /data and the container's unprivileged user can therefore
+      # write to it. A bind mount takes the host directory's ownership instead, which is the one
+      # setup that needs `user:` set to match — see the README.
+      - sync-data:/data
+
+    environment:
+      # The database, on the volume above. Back this file up; it is the only state there is.
+      CMDV_SYNC_DATABASE: /data/cmdv-sync.sqlite
+
+      # trace | debug | info | notice | warning | error | critical
+      CMDV_SYNC_LOG_LEVEL: info
+
+      # Registration is also sign-up: the first device to use a username creates the account.
+      # Uncomment and list the usernames you intend to exist, and no others can be created. Worth
+      # doing before this is reachable from the internet, and unnecessary on a home network.
+      # CMDV_SYNC_USERNAMES: alice,bob
+
+      # The unauthenticated registration endpoint runs PBKDF2 at 600,000 iterations — about 1.35
+      # seconds of CPU per request on fast hardware — so it is rate-limited globally by default: 10
+      # attempts per 300 seconds. Raise it if you are setting up a dozen devices at once; 0 turns it
+      # off entirely.
+      # CMDV_SYNC_REGISTRATION_ATTEMPTS: "10"
+      # CMDV_SYNC_REGISTRATION_WINDOW: "300"
+
+      # If registering a device on your hardware takes long enough to look broken — a Raspberry Pi,
+      # say — lower this. It is a real trade against someone who has stolen the database, so lower
+      # it deliberately; 210000 is OWASP's older guidance for the same construction. Existing
+      # passwords keep working, because the count is stored with each hash. Minimum 10000.
+      # CMDV_SYNC_PASSWORD_ITERATIONS: "210000"
+
+    # Long enough for in-flight syncs to finish. The server shuts down gracefully on SIGTERM, and
+    # a sync interrupted anyway is retried by the device — nothing is lost either way, but there
+    # is no reason to cut one short.
+    stop_grace_period: 15s
+
+    # Uncomment for a bind mount, matched to the owner of the host directory.
+    # Find the numbers with: stat -c '%u:%g' /path/on/host
+    # user: "1000:1000"
+
+    security_opt:
+      # The server never needs to gain a privilege it did not start with, so say so.
+      - no-new-privileges:true
+
+volumes:
+  sync-data:
