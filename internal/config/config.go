@@ -285,7 +285,12 @@ func (c *Config) PrepareDatabaseDirectory() error {
 		}
 		return nil
 	} else if err != nil {
-		return &Error{"CMDV_SYNC_DATABASE", fmt.Sprintf("names a directory %q that could not be inspected: %v.", dir, err)}
+		// Reached when the path is unusable for a reason other than absence — most often a *file*
+		// standing where a parent directory should be, which is what `CMDV_SYNC_DATABASE=/data` looks
+		// like when the operator meant `/data/sync.sqlite` and /data is a bind-mounted file. So this
+		// branch gets the same hint as the other two; it was the one case that did not, and its
+		// message was the less useful for it.
+		return &Error{"CMDV_SYNC_DATABASE", fmt.Sprintf("names a directory %q that cannot be used: %v.\nIf this is a Docker volume, check that it is mounted as a directory and writable by this container's user.", dir, err)}
 	}
 
 	// Write-ahead logging puts -wal and -shm files *beside* the database, so a writable database

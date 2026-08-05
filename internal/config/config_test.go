@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -257,7 +258,17 @@ func TestABareFilenameNeedsNoDirectory(t *testing.T) {
 
 // A writable database file in a read-only directory is not enough: WAL writes -wal and -shm beside
 // it, so this has to be caught now rather than on the first write.
+//
+// Skipped on Windows, and the reason is about the *test* rather than the behaviour: Unix mode bits are
+// largely ignored there — access is governed by NTFS ACLs — so `os.Mkdir(dir, 0o500)` produces a
+// perfectly writable directory and the premise cannot be constructed without manipulating ACLs. The
+// server-side check is a real write probe rather than a permission-bit inspection, so it works
+// correctly on Windows; what cannot be arranged here is a directory for it to fail against. The other
+// branch of the same function is covered on every platform by the test below.
 func TestAnUnwritableDirectoryIsReportedWithThePathAndReason(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not restrict access on Windows; see the comment above")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root, which can write to a read-only directory")
 	}
@@ -277,6 +288,32 @@ func TestAnUnwritableDirectoryIsReportedWithThePathAndReason(t *testing.T) {
 		t.Errorf("the message does not name the directory: %v", err)
 	}
 	// Says where to look, because a Docker volume mounted one path along is the usual cause.
+	if !strings.Contains(err.Error(), "Docker volume") {
+		t.Errorf("the message does not mention the usual cause: %v", err)
+	}
+}
+
+// A directory that cannot be created is reported with the path, on every platform.
+//
+// The portable half of the case above: a *file* standing where a parent directory should be makes
+// MkdirAll fail on Linux, macOS and Windows alike, with no permission bits involved. This is not a
+// contrived scenario either — it is what `CMDV_SYNC_DATABASE=/data` looks like when the operator meant
+// `/data/sync.sqlite` and /data is a bind-mounted file.
+func TestADatabaseDirectoryThatCannotBeCreatedIsReported(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("a file, not a directory"), 0o600); err != nil {
+		t.Fatalf("creating the blocking file: %v", err)
+	}
+
+	c := &Config{Database: filepath.Join(blocker, "nested", "sync.sqlite")}
+	err := c.PrepareDatabaseDirectory()
+	if err == nil {
+		t.Fatal("a database path under a regular file was accepted")
+	}
+	if !strings.Contains(err.Error(), "CMDV_SYNC_DATABASE") {
+		t.Errorf("the message does not name the variable: %v", err)
+	}
 	if !strings.Contains(err.Error(), "Docker volume") {
 		t.Errorf("the message does not mention the usual cause: %v", err)
 	}
