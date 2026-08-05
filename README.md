@@ -104,11 +104,26 @@ docker run -d \
   -p 127.0.0.1:8080:8080 \
   -v cmdv-sync-data:/data \
   -e CMDV_SYNC_TOKENS="$(openssl rand -base64 32)" \
-  ghcr.io/marc2912/cmdv-reader-sync-server:latest
+  ghcr.io/marc2912/cmdv-reader-sync-server:main
 ```
 
 Save that token somewhere before you lose the shell — the app needs it, and the server keeps only a
 hash.
+
+### Published images
+
+| Tag | What it is | Platforms |
+|---|---|---|
+| `:main` | The newest commit on `main`, published only after the image has been built, started, and exercised in CI. | amd64 |
+| `:sha-<12 chars>` | An exact commit. Immutable, so a deployment can pin one and roll back to it. | amd64 |
+| `:latest`, `:X.Y.Z`, `:X.Y` | Tagged releases. | amd64, arm64 |
+
+`:latest` is deliberately *not* moved by a push to `main` — pulling it gets you a release, not whatever
+landed an hour ago. Until the first release is tagged, use `:main`.
+
+arm64 images are built by the release workflow only, because a multi-platform build cannot be loaded
+into the local daemon and therefore cannot be smoke-tested in the same job that builds it. For a
+Raspberry Pi before the first release, build locally with `docker compose up -d --build`.
 
 ### As a binary, without Docker
 
