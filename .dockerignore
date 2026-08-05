@@ -1,0 +1,20 @@
+# Everything, then the few things the build actually needs back.
+#
+# An allowlist rather than a list of exclusions, because the cost of getting that wrong is invisible: a
+# stray build directory or a database file in the context bloats every `docker build` and nothing says
+# so. Getting *this* wrong fails the build loudly with a missing file.
+*
+
+!go.mod
+!go.sum
+!cmd
+!cmd/**
+!internal
+!internal/**
+
+# And not these, wherever they turn up inside the directories above.
+**/.DS_Store
+**/*_test.go
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm

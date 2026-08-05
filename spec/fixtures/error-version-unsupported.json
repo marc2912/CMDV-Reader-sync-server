@@ -1,0 +1,4 @@
+{
+  "reason": "versionUnsupported",
+  "message": "This server speaks version 2 of the sync protocol."
+}

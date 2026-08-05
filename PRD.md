@@ -158,7 +158,7 @@ The existing progress prompt becomes one case of a general mechanism rather than
 | **A hosted offering becomes viable** | Because the server cannot read what it stores, running instances *for other people* stops requiring them to trust the operator — including trusting them with reading history and private notes. That makes a low-cost subscription a real option alongside self-hosting, sharing one codebase and one protocol, with no privacy claim that has to be taken on faith. Self-hosters lose nothing by it. |
 | **End-to-end encryption stays a roadmap, not a rewrite** | The server never learns whether a blob is encrypted, under what scheme, or with which key model. So encryption can be introduced, strengthened, re-keyed, or have its key derivation replaced entirely as app-side work with **zero server change** — including changes that would be breaking in any design where the server understood payloads. |
 | Installable on macOS, Windows and Linux, by anyone, without the app | Standalone repo, no path dependency, container-first |
-| Anyone can write their own server or client | Open source, and a spec plus fixtures rather than shared Swift |
+| Anyone can write their own server or client | Open source, and a spec plus fixtures rather than shared code |
 | Server is ~300 lines: two tables, three endpoints, one `INSERT` | Everything above, compounded |
 
 ## What we give up, and why that is acceptable
@@ -170,7 +170,7 @@ The existing progress prompt becomes one case of a general mechanism rather than
 | **Bounded storage.** Append-only grows with edits rather than objects. | ~10k entries/year for two devices. Disk is irrelevant; replay is sub-second. Revisit if background sync is ever added. |
 | **"Last edit wins" semantics.** | Becomes "last sync wins" — but this is *mitigated rather than merely accepted*. Field-level deltas mean edits to different fields of one record never collide at all. A genuine collision, meaning the same field edited on two devices since either last synced, is detected during import and put to the reader as a conflict instead of being resolved silently. So "last sync wins" applies only where the reader has been asked and answered, or where there was nothing to lose. |
 | **Recoverability without the passphrase.** | Inherent to encryption. Mitigated by deriving the key from a passphrase rather than generating it randomly, so recovery needs three obtainable values rather than a copy of a random key. |
-| **A single source of truth in code.** | Replaced by a spec plus fixtures that test the wire rather than the Swift. Strictly better for interoperability. |
+| **A single source of truth in code.** | Replaced by a spec plus fixtures that test the wire rather than one language's rendering of it. Strictly better for interoperability, and unavoidable anyway once the two sides are in different languages. |
 | **A smaller app.** | The app absorbs encryption, key derivation, QR pairing and ordered replay. This is the real cost: complexity moves to the side that is slower to fix. Mitigated by the fact that ordered replay is *simpler* than the merge logic it replaces. |
 
 ---
@@ -196,13 +196,26 @@ The existing progress prompt becomes one case of a general mechanism rather than
 - **Compaction, permanently.** Not deferred — rejected. See Part 2.
 - Any server-side opinion about which version of a record is correct.
 
-## Platform note, and one thing it implies
+## Stack and distribution — decided
 
-The requirement is macOS, Windows and Linux. Docker delivers all three uniformly and is the primary distribution: Docker Desktop covers macOS and Windows, and the image itself is Linux. That satisfies N2 for essentially every user, and it is what the README should lead with.
+**The server is written in Go.** Not Swift, despite the app being Swift, and the reasoning is worth recording because it looks like an inconsistency until you see why.
 
-A **native binary** on all three is a stronger claim and worth being explicit about, because it has a language consequence. Swift on Windows is the weakest of its three platforms — the toolchain works, but SwiftNIO's Windows support is markedly less exercised than its Linux support, and a self-hosted server that hits an obscure networking bug on Windows is a bad experience to debug remotely. If native Windows binaries matter as a distribution channel rather than just Docker, that is a genuine argument for building this in Go, which cross-compiles to all three from one machine and produces a single dependency-free executable.
+Sharing a language with the app was the *only* argument for Swift here, and v2 removes it: there is no shared code left, because the envelope contains no app-domain concept and the contract is a spec plus fixtures. With that gone, Go wins on every axis this server is judged by.
 
-This is worth deciding deliberately rather than discovering later. The v2 server is small enough — two tables, three endpoints, one `INSERT` — that the language is close to an implementation detail, and none of the architecture in Part 4 depends on Swift.
+| | Go | Swift |
+|---|---|---|
+| Native binaries for macOS, Windows, Linux | One cross-compile step, from any machine | Windows is the weakest platform; SwiftNIO's Windows support is far less exercised than its Linux support |
+| Container image | `FROM scratch`, ~10 MB | Swift runtime image, hundreds of MB |
+| Build time | Seconds | ~52 s cold |
+| Dependencies | One pure-Go SQLite driver; `net/http` covers four routes | Hummingbird, SwiftNIO and its transitive graph |
+| CGO | Off. `modernc.org/sqlite` is pure Go, which is what makes cross-compilation trivial and `scratch` possible | n/a |
+
+**Distribution is both**, and they are cheap together rather than two efforts:
+
+- **Docker** is the documented path and what the README leads with. Docker Desktop covers macOS and Windows; the image is Linux.
+- **Tagged GitHub releases** carry prebuilt binaries for macOS, Windows and Linux on amd64 and arm64. With `CGO_ENABLED=0` this is one matrix step in CI producing six artefacts, so it costs a few lines rather than a second build system.
+
+Nothing in Part 4's architecture depended on the language, which is why this decision could be deferred until after the design settled.
 
 ## Users
 
@@ -210,7 +223,7 @@ This is worth deciding deliberately rather than discovering later. The v2 server
 |---|---|
 | **Operator** (usually the reader) | Install via Docker, set one or more tokens, back up one file, read logs that contain no reader data. |
 | **Reader** | Enter three things once on the first device, scan a code on the rest, and never think about it again. |
-| **Third-party implementer** | The repository is open source, and the spec plus fixtures are sufficient to build an independent server or client without reading the Swift. Anyone who dislikes this implementation should be able to replace it and keep their app working. |
+| **Third-party implementer** | The repository is open source, and the spec plus fixtures are sufficient to build an independent server or client without reading the Go. Anyone who dislikes this implementation should be able to replace it and keep their app working. |
 | **Hosted subscriber** *(possible future)* | Uses an instance someone else runs, without having to trust that operator with their reading history or private notes. Made possible by the server being unable to read what it stores. |
 
 ## Functional requirements
@@ -226,7 +239,7 @@ This is worth deciding deliberately rather than discovering later. The v2 server
 | S5 | Support push and pull in one request, and pull alone (an empty `entries` array). Each request is atomic in itself. The app uses the pull-only form for the import step of import → resolve → export, so the server needs no knowledge of that flow. |
 | S6 | Authenticate by bearer token, compared in constant time against a configured set. The matched token selects the dataset. |
 | S7 | Record a device's identity and name on first contact, so other devices can list it. |
-| S8 | Let a device remove its own registration. |
+| S8 | Let a device be delisted by identifier. **Not** "its own only": every device in a dataset holds the same token, so the server cannot authenticate a device *as itself* — anything holding the token could claim to be any device. This is list management, not access control, and must not be presented as the latter. Cutting off a device you no longer hold is token rotation. |
 | S9 | Answer an unauthenticated health check. |
 | S10 | Refuse a protocol version it does not speak, with an explanation rather than a guess. |
 | S11 | Isolate datasets absolutely. A token must never reach another token's entries. |
@@ -339,7 +352,7 @@ POST /api/v1/sync
 GET /api/v1/devices
   ← [ { "deviceID": "<uuid>", "deviceName": "Marc's phone", "lastSeenAt": "…" } ]
 
-DELETE /api/v1/devices/me      ← 204. Removes the caller's own listing only.
+DELETE /api/v1/devices/{deviceID}   ← 204, or 404 when not listed. Removes a listing; entries are kept.
 
 GET /api/v1/health             ← { "status": "ok", "version": 2 }
 ```
@@ -380,26 +393,31 @@ Ordering is entirely the server's `sequence`. The app applies entries in that or
 ## Module layout
 
 ```
-Sources/
-  CMDVSyncServer/          Library, so tests construct it in-process
-    Configuration.swift      Six variables, validated, with clear refusals
-    TokenSet.swift           Constant-time lookup, token → dataset
-    EntryStore.swift         The two tables; append and page
-    SyncServer.swift         Three routes
-    ErrorTranslation.swift   Thrown errors → described JSON responses
-    SQLiteConnection.swift   Bound parameters only; nothing interpolated
-  cmdv-sync-server/        Executable: read environment, open store, listen
-  CSQLiteShim/             SQLite's C API portably; `import SQLite3` is Apple-only
+cmd/cmdv-sync-server/
+  main.go                  Read environment, open store, listen, shut down cleanly
+internal/config/
+  config.go                Six variables, validated, with refusals that name the variable
+internal/auth/
+  tokens.go                Constant-time lookup, token → dataset
+internal/store/
+  store.go                 The two tables; append and page. Bound parameters only
+  schema.go                Migration on open
+internal/api/
+  server.go                Four routes
+  types.go                 Wire shapes. The only place JSON is defined
+  errors.go                Errors → described JSON responses
 spec/
-  PROTOCOL.md              Normative. The single source of truth.
+  PROTOCOL.md              Normative. The single source of truth
   fixtures/*.json          One per message shape, round-tripped byte-identically
 ```
 
-Dependencies: Hummingbird 2 (HTTP), swift-crypto (SHA-256 for dataset derivation), swift-log. No password hashing, no shared app module, no path dependency.
+`internal/` rather than a public package tree, deliberately: nothing here is a library for anyone else to import, and marking it so means the compiler enforces that rather than a convention. The one thing that *is* public API is `spec/`.
+
+**Dependencies: one.** `modernc.org/sqlite`, a pure-Go SQLite. `net/http` covers four routes with Go 1.22+ pattern routing, `crypto/sha256` and `crypto/subtle` cover dataset derivation and constant-time comparison, and `log/slog` covers structured logging — all standard library. No HTTP framework, no ORM, no logging library, no password hashing, and nothing that depends on the app.
 
 ## Operational architecture
 
-- **Container:** multi-stage build, Swift image to slim runtime, unprivileged UID, `/data` volume, health check following `CMDV_SYNC_PORT`, exec-form entrypoint so SIGTERM reaches PID 1.
+- **Container:** multi-stage build, Go builder to `FROM scratch`, static binary, non-root UID, `/data` volume, exec-form entrypoint so SIGTERM reaches PID 1. `scratch` has no shell and no `curl`, so the health check is the binary itself invoked with a flag rather than an external tool — which keeps the image at roughly the size of the binary.
 - **Compose:** publishes on `127.0.0.1` by default, since TLS is not terminated here and the default configuration must not be the exposed one.
 - **Proxy:** Caddy, nginx and Traefik examples. nginx needs `client_max_body_size` raised — its 1 MB default would break a first sync.
 - **Backup:** `sqlite3 … ".backup"` from inside the container. WAL mode means a plain file copy can capture a torn state.
@@ -407,7 +425,9 @@ Dependencies: Hummingbird 2 (HTTP), swift-crypto (SHA-256 for dataset derivation
 
 ## Revocation
 
-**A device you hold — self-removal.** The app clears the derived key, token and cursor from the Keychain and calls `DELETE /api/v1/devices/me` so it stops appearing in other devices' lists. Its entries remain, because other devices may not have replayed them.
+**A device you hold — self-removal.** The app clears the derived key, token and cursor from the Keychain and calls `DELETE /api/v1/devices/{its own deviceID}` so it stops appearing in other devices' lists. Its entries remain, because other devices may not have replayed them.
+
+Note the endpoint is deliberately *not* named `/me`. With a shared token the server cannot verify that a caller is the device it claims to be, so a "remove only yourself" restriction would be a control that looks like security and is not. Naming it honestly keeps the guarantee and the mechanism the same size.
 
 **A device you have lost — token rotation.** Rotate the token in configuration and restart. All devices are cut off; the ones you still hold are re-paired by QR.
 
@@ -525,7 +545,7 @@ QR scanning needs `NSCameraUsageDescription`, absent from both `App/Info.plist` 
 
 | Phase | Work | Independently shippable? |
 |---|---|---|
-| **1** | The server, greenfield: two tables, three endpoints, token auth, Docker, README, CI, `spec/`. `CMDV-Reader/Server/` keeps running untouched. | Yes — testable by `curl` alone |
+| **1** | The server, greenfield in Go: two tables, four routes, token auth, Docker, cross-compiled release binaries, README, CI, `spec/`. `CMDV-Reader/Server/` keeps running untouched. | Yes — testable by `curl` alone |
 | **2** | App crypto and key derivation: `SyncCrypto`, `PassphraseKey`, `Passphrase`, KDF moved across. | Yes — pure, unit-testable |
 | **3** | App deltas and ordered replay: field clocks, delta emission, `SyncMerge` reshape, extended `ConvergenceTests`. | Yes — the convergence tests are the gate |
 | **3b** | The import → resolve → export flow and field-level conflict UI. Depends on the field clocks from 3. | Yes |
@@ -540,6 +560,6 @@ QR scanning needs `NSCameraUsageDescription`, absent from both `App/Info.plist` 
 - Dataset isolation: token A never sees token B's entries; assert at the store and over HTTP.
 - Blob fidelity: bytes returned exactly as sent.
 - Recovery end to end, per §Part 5 tests — this is what proves the salt is derived rather than random.
-- Against the real binary: `swift build -c release`, run on a scratch database, drive sync with `curl`, confirm two devices' entries for one object both come back.
+- Against the real binary: `go build ./cmd/cmdv-sync-server`, run on a scratch database, drive sync with `curl`, confirm two devices' entries for one object both come back and that one token cannot see another's.
 - `docker compose up -d`, plus a CI job that builds the image, exercises it, and times the graceful stop.
 - Confirm no `.package(path:)` to `CMDVReaderKit` anywhere, and no `Server/` directory in the app repo.

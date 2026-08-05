@@ -1,0 +1,70 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: cmdv-sync
+
+services:
+  sync:
+    build:
+      context: .
+    image: cmdv-sync-server:local
+    container_name: cmdv-sync-server
+    restart: unless-stopped
+
+    # Published on the loopback address only, deliberately.
+    #
+    # This server does not terminate TLS. Binding the published port to 127.0.0.1 means that until you
+    # have put a reverse proxy in front of it, it is reachable from this machine and nowhere else — so
+    # the default configuration cannot accidentally be the one on the internet.
+    #
+    # Change to "8080:8080" to reach it from elsewhere on a home network or a VPN. Do not change it to
+    # reach it from the internet; put a proxy in front instead. See the README.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      # A named volume rather than a bind mount, because Docker gives a fresh named volume the
+      # ownership the image set on /data, so the container's unprivileged user can write to it. A bind
+      # mount takes the host directory's ownership instead, which is the one setup that needs `user:`
+      # set to match — see the README.
+      - sync-data:/data
+
+    environment:
+      CMDV_SYNC_DATABASE: /data/cmdv-sync.sqlite
+
+      # debug | info | warn | error
+      CMDV_SYNC_LOG_LEVEL: info
+
+    # The tokens, kept out of this file.
+    #
+    # A token in a compose file ends up in shell history, in `docker inspect` output, and in any
+    # screenshot of this file. Reading them from .env keeps them in one place that is gitignored.
+    #
+    #   cp .env.example .env
+    #   openssl rand -base64 32        # one per person who should have their own dataset
+    #
+    # Each token is an independent dataset. Two readers sharing one server get one token each and
+    # cannot see each other's data.
+    env_file:
+      - .env
+
+    # Long enough for in-flight syncs to finish. The server shuts down gracefully on SIGTERM, and a
+    # sync interrupted anyway is retried by the device — nothing is lost either way, but there is no
+    # reason to cut one short.
+    stop_grace_period: 15s
+
+    # Uncomment for a bind mount instead of the named volume, matched to the owner of the host
+    # directory. Find the numbers with:  stat -c '%u:%g' /path/on/host
+    # user: "1000:1000"
+
+    security_opt:
+      # The server never needs to gain a privilege it did not start with, so say so.
+      - no-new-privileges:true
+
+    # Nothing here writes outside the volume: the binary is static, the database is on /data, and
+    # SQLite's temporary storage is in memory by configuration. So the root filesystem can be sealed.
+    read_only: true
+
+volumes:
+  sync-data:

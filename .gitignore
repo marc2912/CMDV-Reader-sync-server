@@ -1,0 +1,22 @@
+# Tokens. `.env.example` is committed; `.env` never is.
+.env
+
+# The database, and everything SQLite puts beside it. Never commit a reader's data.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+data/
+
+# Build output
+/dist/
+/cmdv-sync-server
+cmdv-sync-server.exe
+
+# Go
+*.test
+*.out
+coverage.*
+
+# macOS
+.DS_Store

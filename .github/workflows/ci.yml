@@ -1,0 +1,195 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # All three platforms the server claims to support, because the claim is otherwise untested.
+        # The SQLite driver is pure Go, so this is a real check of it rather than of cgo toolchains.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Formatting
+        # gofmt rather than a linter with opinions. Fails on a diff, so formatting never becomes a
+        # review conversation.
+        if: runner.os != 'Windows'
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        # -race because the server is concurrent by nature and a data race here would corrupt a
+        # reader's history rather than merely crash.
+        run: go test -race -count=1 ./...
+
+  build:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Every release target, on every push. A cross-compile that only breaks at tag time breaks when
+      # it is least convenient.
+      - name: Build every release target
+        run: |
+          set -euo pipefail
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              go build -trimpath -ldflags="-s -w" -o /dev/null ./cmd/cmdv-sync-server
+            echo "ok $target"
+          done
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: cmdv-sync-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A Dockerfile that builds but produces a container which exits immediately, or one whose
+      # unprivileged user cannot write to its own volume, would otherwise pass.
+      - name: Start it and exercise it
+        run: |
+          set -euo pipefail
+          TOKEN_A="$(openssl rand -base64 32)"
+          TOKEN_B="$(openssl rand -base64 32)"
+
+          docker run -d --name sync -p 8080:8080 \
+            -e "CMDV_SYNC_TOKENS=${TOKEN_A},${TOKEN_B}" \
+            cmdv-sync-server:ci
+
+          # Wait on the health check the image declares, rather than on a fixed sleep.
+          for _ in $(seq 1 60); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' sync)"
+            [ "$status" = "healthy" ] && break
+            [ "$status" = "unhealthy" ] && { docker logs sync; exit 1; }
+            sleep 1
+          done
+          [ "$(docker inspect --format '{{.State.Health.Status}}' sync)" = "healthy" ]
+
+          curl -fsS http://127.0.0.1:8080/api/v1/health | tee /dev/stderr | grep -q '"status":"ok"'
+
+          sync_call() {
+            curl -fsS -X POST http://127.0.0.1:8080/api/v1/sync \
+              -H 'Content-Type: application/json' \
+              -H 'X-CMDV-Sync-Version: 2' \
+              -H "Authorization: Bearer $1" \
+              -d "$2"
+          }
+
+          # Push under token A. This writes to SQLite on the volume, so a volume the unprivileged user
+          # cannot write to fails right here.
+          sync_call "$TOKEN_A" '{"deviceID":"phone","deviceName":"CI phone","cursor":0,"entries":[{"blob":"aGVsbG8="}]}' \
+            | tee /dev/stderr | grep -q '"hasMore":false'
+
+          # A second device under the same token receives it, byte-identical.
+          sync_call "$TOKEN_A" '{"deviceID":"tablet","deviceName":"CI tablet","cursor":0,"entries":[]}' \
+            | tee /dev/stderr | grep -q '"blob":"aGVsbG8="'
+
+          # And token B sees nothing, which is the isolation guarantee a hosted instance would rest on.
+          sync_call "$TOKEN_B" '{"deviceID":"tablet","deviceName":"CI tablet","cursor":0,"entries":[]}' \
+            | tee /dev/stderr | grep -q '"entries":\[\]'
+
+          # An unknown token is refused.
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/api/v1/sync \
+            -H 'Content-Type: application/json' -H 'X-CMDV-Sync-Version: 2' \
+            -H "Authorization: Bearer $(openssl rand -base64 32)" -d '{}')"
+          [ "$code" = "401" ]
+
+          # The backup subcommand works without a shell in the image.
+          docker exec sync /cmdv-sync-server -backup /data/backup.sqlite
+          docker exec sync /cmdv-sync-server -version
+
+          # Runs unprivileged. Easy to regress, so asserted.
+          [ "$(docker inspect --format '{{.Config.User}}' sync)" = "nonroot:nonroot" ]
+
+      - name: Refuse to start without a token
+        run: |
+          set -euo pipefail
+          # An open server is the one failure mode that must be impossible, so this asserts the exit
+          # code rather than just that it stopped.
+          code=0
+          docker run --rm cmdv-sync-server:ci || code=$?
+          [ "$code" = "78" ]
+
+      - name: Stop it gracefully
+        run: |
+          set -euo pipefail
+          # SIGTERM has to be enough. If it is not, `docker stop` takes the full timeout and then kills
+          # the process, which is how in-flight syncs get severed in production.
+          start=$(date +%s)
+          docker stop --timeout 15 sync
+          elapsed=$(( $(date +%s) - start ))
+          echo "stopped in ${elapsed}s"
+          [ "$elapsed" -lt 10 ]
+          docker logs sync
+
+  spec:
+    name: Spec fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The fixtures are the contract with the app. Regenerating them must be a no-op: if it is not,
+      # either the wire format changed without the fixtures being updated, or the fixtures were edited
+      # by hand. Both are things a pull request should have to state out loud.
+      - name: Fixtures are in step with the types
+        run: |
+          set -euo pipefail
+          go test ./internal/api -run TestFixtures -count=1
+          go test ./internal/api -run TestFixtures -update -count=1
+          if ! git diff --quiet -- spec/fixtures; then
+            echo "spec/fixtures is out of step with the wire types:"
+            git diff -- spec/fixtures
+            exit 1
+          fi
