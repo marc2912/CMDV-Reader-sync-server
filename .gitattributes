@@ -1,0 +1,19 @@
+# Line endings are LF everywhere, checked out as LF on Windows too.
+#
+# Not a style preference. Git on Windows defaults to converting to CRLF on checkout, and
+# `spec/fixtures/*.json` is a byte-exact contract with the app — the fixture test compares the file's
+# bytes against what the encoder produces, so a translated line ending fails the test with two
+# visually identical blobs and no explanation. That is exactly what happened on the first CI run.
+#
+# gofmt also assumes LF, so the same rule keeps Go sources consistent.
+* text=auto eol=lf
+
+# The fixtures, explicitly, so this survives someone relaxing the default above. `-text` means Git
+# never inspects or converts them: the bytes in the repository are the bytes on disk, which is the
+# only useful guarantee for a file whose whole purpose is being compared byte for byte.
+spec/fixtures/*.json -text
+
+# Genuinely binary, in case any ever lands here.
+*.png binary
+*.jpg binary
+*.sqlite binary
